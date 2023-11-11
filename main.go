@@ -11,6 +11,7 @@ import (
 const (
 	framesToRead = 8192 // Define the number of frames to read each time
 	baseFreq     = 2371
+	magicByte    = 0xE0
 )
 
 // generateSignChangeBits reads a WAV file and emits a stream of sign-change bits.
@@ -66,72 +67,12 @@ func generateSignChangeBits(decoder *wav.Decoder, offset bool) ([]int, error) {
 	return bits, nil
 }
 
-// func generateBytes(bitstream []uint8, sampleRate int) ([]byte, error) {
-// 	bitmasks := []byte{0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80}
-// 	samplesPerBit := int(float64(sampleRate)*4/baseFreq + 0.5)
-// 	sample := make([]uint8, samplesPerBit)
-
-// 	count := 0
-
-// 	fmt.Println(samplesPerBit)
-
-// 	for i := 0; i < samplesPerBit; i++ {
-// 		sample[i] = bitstream[i]
-// 	}
-// 	signChanges := sum(sample)
-
-// 	result := []byte{}
-// 	i := 0
-// 	for i < len(bitstream) {
-// 		if bitstream[i] != 0 {
-// 			signChanges++
-// 		}
-// 		if sample[0] != 0 {
-// 			signChanges--
-// 		}
-// 		copy(sample, sample[1:])
-// 		sample[len(sample)-1] = bitstream[i]
-
-// 		// fmt.Println(signChanges)
-
-// 		if signChanges <= 4 {
-// 			var byteVal byte
-// 			for _, mask := range bitmasks {
-// 				sum := 0
-// 				for j := 0; j < samplesPerBit && i+j < len(bitstream); j++ {
-// 					sum += int(bitstream[i+j])
-// 				}
-// 				if sum > 7 {
-// 					byteVal |= mask
-// 				}
-// 				i += samplesPerBit
-// 			}
-
-// 			// skip stop bits
-// 			i += 2 * samplesPerBit
-
-// 			// print byte as hex
-// 			fmt.Printf("%02x\n", byteVal)
-// 			count++
-// 			fmt.Println(count)
-// 			result = append(result, byteVal)
-// 			for j := 0; j < samplesPerBit && i+j < len(bitstream); j++ {
-// 				sample[j] = bitstream[i+j]
-// 			}
-// 			signChanges = sum(sample)
-// 		} else {
-// 			i++
-// 		}
-// 	}
-
-//		return result, nil
-//	}
 const BaseFreq = 2371 // Set your BASE_FREQ
-var BitMasks = []int{0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80}
+var BitMasks = []byte{0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80}
 
 // generateBytes processes the sign change bits and assembles them into bytes.
 func generateBytes(bitstream []int, framerate int) ([]byte, error) {
-	framesPerBit := int(float64(framerate) * 4 / BaseFreq)
+	framesPerBit := int(float64(framerate)*4/BaseFreq + 0.5)
 	sample := make([]int, framesPerBit) // Slice to use as a circular buffer
 	var sampleIndex int                 // Current index in the sample buffer
 
@@ -143,6 +84,8 @@ func generateBytes(bitstream []int, framerate int) ([]byte, error) {
 	var result []byte
 	signChanges := sum(sample) // Calculate initial sum of sign changes
 	bitstreamIndex := framesPerBit - 1
+
+	var foundMagicByte bool
 
 	for bitstreamIndex < len(bitstream) {
 		val := bitstream[bitstreamIndex]
@@ -159,30 +102,37 @@ func generateBytes(bitstream []int, framerate int) ([]byte, error) {
 		sampleIndex = (sampleIndex + 1) % framesPerBit
 
 		if signChanges <= 4 {
-			byteVal := 0
+			var byteVal byte
 			for _, mask := range BitMasks {
 				if sum(bitstream[bitstreamIndex:bitstreamIndex+framesPerBit]) >= 7 {
 					byteVal |= mask
 				}
 				bitstreamIndex += framesPerBit
 			}
-			result = append(result, byte(byteVal))
 
-			// print hex of byte
-			fmt.Printf("%02X\n", byteVal)
+			if byteVal == magicByte {
+				foundMagicByte = true
+			}
+
+			if foundMagicByte {
+				result = append(result, byteVal)
+
+				// print hex of byte
+				fmt.Printf("%02X\n", byteVal)
+			}
 
 			// Skip the final two stop bits (advance the index)
 			bitstreamIndex += 2 * framesPerBit
 
 			// Refill the sample buffer
-			for i := 0; i < framesPerBit-1 && bitstreamIndex+i < len(bitstream); i++ {
+			for i := 0; i < framesPerBit && bitstreamIndex+i < len(bitstream); i++ {
 				sample[sampleIndex] = bitstream[bitstreamIndex+i]
 				sampleIndex = (sampleIndex + 1) % framesPerBit
 			}
 
 			signChanges = sum(sample)
 
-			bitstreamIndex += framesPerBit - 1
+			bitstreamIndex += framesPerBit
 		} else {
 			bitstreamIndex++
 		}
@@ -209,11 +159,14 @@ func sum(slice []int) int {
 // }
 
 func main() {
-	wavFilePath := "123.wav"
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: go run main.go <wav file>")
+		os.Exit(1)
+	}
 
-	waveFile, err := os.Open(wavFilePath)
+	waveFile, err := os.Open(os.Args[1])
 	if err != nil {
-		fmt.Println("Error:", err)
+		fmt.Println(err)
 		os.Exit(1)
 	}
 	defer waveFile.Close()
