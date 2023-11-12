@@ -17,6 +17,7 @@ const (
 	// this is the length of 1 bit cycles in between the program name and the
 	// rest of the data
 	dataBufferLength = 122
+	barByte          = 0xFF
 )
 
 // generateSignChangeBits reads a WAV file and emits a stream of sign-change bits.
@@ -307,7 +308,85 @@ type Note struct {
 	Bar        bool
 }
 
-func parseBytes(data []byte) *Sequence {
+func validateBytes(data []byte) error {
+	if len(data) < 10 {
+		return fmt.Errorf("validation failed - invalid number of bytes: %d", len(data))
+	}
+
+	if data[0] != magicByte {
+		return fmt.Errorf("validation failed - invalid magic byte: %02X", data[0])
+	}
+
+	if int(data[1]) < 0 || int(data[1]) > 9 {
+		return fmt.Errorf("validation failed - invalid program number byte 1: %d", int(data[1]))
+	}
+
+	if int(data[2]) < 0 || int(data[2]) > 9 {
+		return fmt.Errorf("validation failed - invalid program number byte 2: %d", int(data[2]))
+	}
+
+	if int(data[3]) < 0 || int(data[3]) > 9 {
+		return fmt.Errorf("validation failed - invalid program number byte 3: %d", int(data[3]))
+	}
+
+	totalLines := int(binary.BigEndian.Uint16(data[4:6]))
+
+	// TODO: verify maximum line count
+	if totalLines < 0 || totalLines > 999 {
+		return fmt.Errorf("validation failed - invalid total lines: %d", totalLines)
+	}
+
+	if len(data) < totalLines+6 {
+		return fmt.Errorf("validation failed - invalid number of bytes (did not match total lines 1): %d", len(data))
+	}
+
+	byteSum := totalLines
+	var noteLines int
+
+	for i := 0; i < totalLines; i++ {
+		byteSum += int(int8(data[6+i]))
+
+		if data[6+i] != barByte {
+			noteLines++
+		}
+	}
+
+	if noteLines%3 != 0 {
+		return fmt.Errorf("validation failed - invalid number of note lines: %d", noteLines)
+	}
+
+	byteSum = int(int8(byteSum % 256))
+
+	parityByte := data[6+totalLines]
+
+	computedParityByte := int(int8(parityByte + data[6+totalLines+1]))
+
+	if computedParityByte+byteSum != 0 {
+		return fmt.Errorf("validation failed - invalid parity byte 1: %02X", parityByte)
+	}
+
+	endLineCount := int(binary.BigEndian.Uint16(data[6+totalLines+1 : 6+totalLines+3]))
+
+	if totalLines != endLineCount {
+		return fmt.Errorf("validation failed - line count does not match: %d != %d", totalLines, endLineCount)
+	}
+
+	computedLineCount := int(int8(data[6+totalLines+1] + data[6+totalLines+2]))
+
+	lineCountParityByte := int(int8(data[6+totalLines+3]))
+
+	if computedLineCount+lineCountParityByte != 0 {
+		return fmt.Errorf("validation failed - invalid line count parity byte: %02X", lineCountParityByte)
+	}
+
+	return nil
+}
+
+func parseBytes(data []byte) (*Sequence, error) {
+	if err := validateBytes(data); err != nil {
+		return nil, err
+	}
+
 	program := Sequence{
 		MagicByte:     data[0],
 		ProgramNumber: int(data[1])*100 + int(data[2])*10 + int(data[3]),
@@ -316,7 +395,7 @@ func parseBytes(data []byte) *Sequence {
 
 	i := 6
 	for i < len(data)-4 { // Reserve the last 4 bytes for parity and line count
-		if data[i] == 0xFF {
+		if data[i] == barByte {
 			program.Notes = append(program.Notes, Note{Bar: true})
 			continue
 		}
@@ -335,7 +414,7 @@ func parseBytes(data []byte) *Sequence {
 	program.TotalLines2 = int(binary.BigEndian.Uint16(data[i+1 : i+3]))
 	program.ParityByte2 = data[i+3]
 
-	return &program
+	return &program, nil
 }
 
 func (s *Sequence) String() string {
@@ -423,7 +502,11 @@ func main() {
 	fmt.Println()
 	fmt.Println()
 
-	sequnce := parseBytes(bytes)
+	sequence, err := parseBytes(bytes)
+	if err != nil {
+		fmt.Println("problem parsing bytes:", err)
+		os.Exit(1)
+	}
 
-	fmt.Println(sequnce)
+	fmt.Println(sequence)
 }
