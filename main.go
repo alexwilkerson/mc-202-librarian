@@ -340,29 +340,29 @@ func validateBytes(data []byte) error {
 		return fmt.Errorf("validation failed - invalid number of bytes (did not match total lines 1): %d", len(data))
 	}
 
-	byteSum := totalLines
+	bytesum := totalLines
 	var noteLines int
 
 	for i := 0; i < totalLines; i++ {
-		byteSum += int(int8(data[6+i]))
+		bytesum += int(data[6+i])
 
 		if data[6+i] != barByte {
 			noteLines++
 		}
 	}
 
+	checksum := int8(bytesum)
+
 	if noteLines%3 != 0 {
 		return fmt.Errorf("validation failed - invalid number of note lines: %d", noteLines)
 	}
 
-	byteSum = int(int8(byteSum % 256))
-
 	parityByte := data[6+totalLines]
 
-	computedParityByte := int(int8(parityByte + data[6+totalLines+1]))
+	computedParityByte := int8(parityByte) + int8(data[6+totalLines+1])
 
-	if computedParityByte+byteSum != 0 {
-		return fmt.Errorf("validation failed - invalid parity byte 1: %02X", parityByte)
+	if computedParityByte+checksum != 0 {
+		return fmt.Errorf("validation failed - invalid parity byte 1: computed: (%d, %02X) checksum: (%d, %02X)", computedParityByte, byte(computedParityByte), checksum, byte(checksum))
 	}
 
 	endLineCount := int(binary.BigEndian.Uint16(data[6+totalLines+1 : 6+totalLines+3]))
@@ -376,7 +376,7 @@ func validateBytes(data []byte) error {
 	lineCountParityByte := int(int8(data[6+totalLines+3]))
 
 	if computedLineCount+lineCountParityByte != 0 {
-		return fmt.Errorf("validation failed - invalid line count parity byte: %02X", lineCountParityByte)
+		return fmt.Errorf("validation failed - invalid parity byte 2: computed: (%d, %02X) lineCountParityByte: (%d, %02X)", computedLineCount, byte(computedLineCount), lineCountParityByte, byte(lineCountParityByte))
 	}
 
 	return nil
@@ -508,5 +508,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println(sequence)
+	_ = sequence
+
+	// fmt.Println(sequence)
 }
