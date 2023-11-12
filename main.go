@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 
@@ -13,8 +14,12 @@ import (
 )
 
 const (
+	sampleRate   = 44100
 	framesToRead = 8192 // Define the number of frames to read each time
-	baseFreq     = 2371
+	oneFreq      = 2370
+	zeroFreq     = oneFreq / 2
+	zeroCycles   = 2
+	oneCycles    = 4
 	magicByte    = 0xE0
 	// this is the length of 1 bit cycles in between the program name and the
 	// rest of the data
@@ -99,7 +104,7 @@ func generateSignChangeBits(decoder *wav.Decoder, offset bool) ([]int, error) {
 	return bits, nil
 }
 
-const BaseFreq = 2371 // Set your BASE_FREQ
+const BaseFreq = 2370 // Set your BASE_FREQ
 var BitMasks = []uint16{0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80}
 
 // generateBytes processes the sign change bits and assembles them into bytes.
@@ -173,6 +178,8 @@ L1:
 				}
 				bitstreamIndex += framesPerBit
 			}
+
+			// fmt.Printf("%02X\n", byteVal)
 
 			// short circuit if we have not found the magic byte yet
 			// therefore this must be invalid data
@@ -253,6 +260,8 @@ L1:
 
 			// VALID BYTE
 			validByteIndex++
+
+			fmt.Println("magic")
 
 			if byteVal == magicByte {
 				foundMagicByte = true
@@ -478,6 +487,30 @@ func (s *Sequence) String() string {
 	return sb.String()
 }
 
+// func generateSamples(freq int, cycles int, amplitude float64) []int {
+// 	numSamples := int(math.Round(float64(cycles*sampleRate) / float64(freq)))
+// 	samples := make([]int, numSamples)
+
+// 	for i := 0; i < numSamples; i++ {
+// 		samples[i] = int(amplitude * float64(0x7FFF) * math.Sin(2*math.Pi*float64(i)*float64(freq)/float64(sampleRate)))
+// 		fmt.Println(samples[i])
+// 	}
+
+// 	return samples
+// }
+
+func generateSamples(freq int, cycles int, amplitude float64) []int {
+	numSamples := int(math.Round(float64(cycles*sampleRate) / float64(freq)))
+	samples := make([]int, numSamples)
+
+	for i := 0; i < numSamples; i++ {
+		x := 2 * math.Pi * float64(i) * float64(freq) / float64(sampleRate)
+		samples[i] = int(amplitude * float64(0x7FFF) * (2/(1+math.Exp(-10*math.Sin(x))) - 1))
+	}
+
+	return samples
+}
+
 func main() {
 	encodePtr := flag.Bool("encode", false, "encode a file")
 
@@ -501,8 +534,28 @@ func main() {
 
 	if *encodePtr {
 		// encode
-		fmt.Println("encode")
-		os.Exit(0)
+
+		f, err := os.Create("test.wav")
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		defer f.Close()
+
+		enc := wav.NewEncoder(f, sampleRate, 16, 1, 1)
+		defer enc.Close()
+
+		// samples := generateSamples(baseFreq, 7*baseFreq, 0.5)
+		samples := generateEmptySequence(0.25)
+
+		buf := &audio.IntBuffer{Data: samples, Format: &audio.Format{SampleRate: sampleRate, NumChannels: 1}}
+
+		if err := enc.Write(buf); err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
+		return
 	}
 
 	if *decodePtr {
@@ -526,6 +579,12 @@ func main() {
 			fmt.Println("problem generating sign change bits:", err)
 			os.Exit(1)
 		}
+
+		// for i := 0; i < len(signBits); i++ {
+		// 	fmt.Printf("%d", signBits[i])
+		// }
+
+		// fmt.Println()
 
 		bytes, err := generateBytes(signBits, int(sampleRate))
 		if err != nil {
@@ -591,4 +650,98 @@ func main() {
 			fmt.Println("json file written to", name+".json")
 		}
 	}
+}
+
+func generateEmptySequence(amplitude float64) []int {
+	var result []int
+
+	// generate 7 seconds of leader tone
+	result = append(result, generateSamples(oneFreq, 7*oneFreq, amplitude)...)
+
+	result = append(result, generateByteSequence(magicByte, amplitude)...)
+
+	// program number
+	result = append(result, generateByteSequence(byte(1), amplitude)...)
+	result = append(result, generateByteSequence(byte(2), amplitude)...)
+	result = append(result, generateByteSequence(byte(3), amplitude)...)
+
+	// data buffer
+	result = append(result, generateSamples(oneFreq, dataBufferLength*oneCycles, amplitude)...)
+
+	// total lines
+	result = append(result, generateByteSequence(byte(0x0), amplitude)...)
+	result = append(result, generateByteSequence(byte(0x0F), amplitude)...)
+
+	// notes
+	result = append(result, generateByteSequence(byte(0x18), amplitude)...)
+	result = append(result, generateByteSequence(byte(0x0C), amplitude)...)
+	result = append(result, generateByteSequence(byte(0x1A), amplitude)...)
+
+	result = append(result, generateByteSequence(byte(0x18), amplitude)...)
+	result = append(result, generateByteSequence(byte(0x0C), amplitude)...)
+	result = append(result, generateByteSequence(byte(0x19), amplitude)...)
+
+	result = append(result, generateByteSequence(byte(0x18), amplitude)...)
+	result = append(result, generateByteSequence(byte(0x0C), amplitude)...)
+	result = append(result, generateByteSequence(byte(0x1E), amplitude)...)
+
+	result = append(result, generateByteSequence(byte(0x18), amplitude)...)
+	result = append(result, generateByteSequence(byte(0x0C), amplitude)...)
+	result = append(result, generateByteSequence(byte(0x1F), amplitude)...)
+
+	result = append(result, generateByteSequence(byte(0x18), amplitude)...)
+	result = append(result, generateByteSequence(byte(0x0C), amplitude)...)
+	result = append(result, generateByteSequence(byte(0x28), amplitude)...)
+
+	// checksum byte
+	result = append(result, generateByteSequence(byte(0xA5), amplitude)...)
+
+	// total lines
+	result = append(result, generateByteSequence(byte(0), amplitude)...)
+	result = append(result, generateByteSequence(byte(0x0F), amplitude)...)
+
+	// total lines checksum byte
+	result = append(result, generateLastByte(byte(0xF1), amplitude)...)
+
+	// generate 1 second of leader tone
+	result = append(result, generateSamples(zeroFreq, zeroFreq, amplitude)...)
+
+	return result
+}
+
+func generateLastByte(b byte, amplitude float64) []int {
+	var result []int
+
+	result = append(result, generateSamples(zeroFreq, zeroCycles, amplitude)...)
+
+	for i := 0; i < 8; i++ {
+		if b&(1<<i) != 0 {
+			result = append(result, generateSamples(oneFreq, oneCycles, amplitude)...)
+		} else {
+			result = append(result, generateSamples(zeroFreq, zeroCycles, amplitude)...)
+		}
+	}
+
+	result = append(result, generateSamples(oneFreq, 1, amplitude)...)
+
+	return result
+}
+
+func generateByteSequence(b byte, amplitude float64) []int {
+	var result []int
+
+	result = append(result, generateSamples(zeroFreq, zeroCycles, amplitude)...)
+
+	for i := 0; i < 8; i++ {
+		if b&(1<<i) != 0 {
+			result = append(result, generateSamples(oneFreq, oneCycles, amplitude)...)
+		} else {
+			result = append(result, generateSamples(zeroFreq, zeroCycles, amplitude)...)
+		}
+	}
+
+	// stop bits
+	result = append(result, generateSamples(oneFreq, oneCycles*2, amplitude)...)
+
+	return result
 }
