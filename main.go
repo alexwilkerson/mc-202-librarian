@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/go-audio/audio"
 	"github.com/go-audio/wav"
@@ -97,6 +99,7 @@ func generateBytes(bitstream []int, framerate int) ([]byte, error) {
 
 	var (
 		foundMagicByte bool
+		magicByteIndex int
 		previousByte   byte
 		validByteIndex int = -1
 		lastByteIndex  int
@@ -157,6 +160,34 @@ L1:
 				continue
 			}
 
+			// the first three bytes proceeding the magic byte are the pattern number
+			// byte 1 is the hundreds place, byte 2 is the tens place, and byte 3 is
+			// the ones place. if any of these bytes are not between 0 and 9, we know
+			// that the magic byte was found in error, so we should return to the frame
+			// after the initial incorrect magic byte was found and continue iterating
+			if foundMagicByte && (validByteIndex+1 == 1 || validByteIndex+1 == 2 || validByteIndex+1 == 3) {
+				if int(byteVal) < 0 || int(byteVal) > 9 {
+					// return to the frame after the initial incorrect byte and continue
+					foundMagicByte = false
+					bitstreamIndex = magicByteIndex + framesPerBit
+					validByteIndex = -1
+					magicByteIndex = 0
+					result = result[:0]
+
+					// Refill the sample buffer
+					for i := 0; i < framesPerBit && bitstreamIndex+i < len(bitstream); i++ {
+						sample[sampleIndex] = bitstream[bitstreamIndex+i]
+						sampleIndex = (sampleIndex + 1) % framesPerBit
+					}
+
+					signChanges = sum(sample)
+
+					bitstreamIndex += framesPerBit
+
+					continue
+				}
+			}
+
 			// check for stop bits.. if the stop bits are not 1s, we know this is
 			// an invalid byte so we will skip it. The exception to this is the
 			// last byte in the stream, which does not have stop bits. instead it
@@ -167,6 +198,33 @@ L1:
 			if lastByteIndex == 0 || validByteIndex+1 != lastByteIndex {
 				for i := 0; i < 2; i++ {
 					if sum(bitstream[bitstreamIndex:bitstreamIndex+framesPerBit]) < 7 {
+						// return to the frame after the initial incorrect byte and continue
+						bitstreamIndex = bitstreamIndex - framesPerBit*(8+i)
+
+						// if we found the magic byte, we know that we are inside the data
+						// buffer so there should be no invalid bytes. if we find an invalid
+						// byte here, it likely means that we have not found the magic byte
+						// yet, so we should skip this byte and return to the frame after
+						// the initial incorrect magic byte was found and continue iterating
+						// through the bitstream
+						if foundMagicByte {
+							foundMagicByte = false
+							bitstreamIndex = magicByteIndex + framesPerBit
+							validByteIndex = -1
+							magicByteIndex = 0
+							result = result[:0]
+						}
+
+						// Refill the sample buffer
+						for i := 0; i < framesPerBit && bitstreamIndex+i < len(bitstream); i++ {
+							sample[sampleIndex] = bitstream[bitstreamIndex+i]
+							sampleIndex = (sampleIndex + 1) % framesPerBit
+						}
+
+						signChanges = sum(sample)
+
+						bitstreamIndex += framesPerBit
+
 						continue L1
 					}
 					bitstreamIndex += framesPerBit
@@ -178,6 +236,7 @@ L1:
 
 			if byteVal == magicByte {
 				foundMagicByte = true
+				magicByteIndex = bitstreamIndex - framesPerBit*11
 			}
 
 			if validByteIndex == 5 {
@@ -187,9 +246,6 @@ L1:
 			result = append(result, byte(byteVal))
 
 			previousByte = byte(byteVal)
-
-			// print hex of byte
-			fmt.Printf("%02X\n", byteVal)
 
 			// check for last byte
 			if lastByteIndex != 0 && validByteIndex == lastByteIndex {
@@ -229,6 +285,86 @@ func sum(slice []int) int {
 		total += v
 	}
 	return total
+}
+
+type Sequence struct {
+	MagicByte     byte
+	ProgramNumber int
+	TotalLines    int
+	Notes         []Note
+	ParityByte1   byte
+	TotalLines2   int
+	ParityByte2   byte
+}
+
+type Note struct {
+	NoteName   string
+	NoteNum    int
+	StepLength int
+	GateLength int
+	Portamento bool
+	Accent     bool
+	Bar        bool
+}
+
+func parseBytes(data []byte) *Sequence {
+	program := Sequence{
+		MagicByte:     data[0],
+		ProgramNumber: int(data[1])*100 + int(data[2])*10 + int(data[3]),
+		TotalLines:    int(binary.BigEndian.Uint16(data[4:6])),
+	}
+
+	i := 6
+	for i < len(data)-4 { // Reserve the last 4 bytes for parity and line count
+		if data[i] == 0xFF {
+			program.Notes = append(program.Notes, Note{Bar: true})
+			continue
+		}
+
+		program.Notes = append(program.Notes, Note{
+			NoteNum:    int(data[i+2] & 0b00111111),
+			StepLength: int(data[i]),
+			GateLength: int(data[i+1]),
+			Portamento: data[i+2]&0b10000000 != 0,
+			Accent:     data[i+2]&0b01000000 != 0,
+		})
+		i += 3
+	}
+
+	program.ParityByte1 = data[i]
+	program.TotalLines2 = int(binary.BigEndian.Uint16(data[i+1 : i+3]))
+	program.ParityByte2 = data[i+3]
+
+	return &program
+}
+
+func (s *Sequence) String() string {
+	var sb strings.Builder
+
+	// pretty print the program
+	sb.WriteString(fmt.Sprintf("Program Number: %d\n", s.ProgramNumber))
+	sb.WriteString(fmt.Sprintf("Total Lines: %d\n", s.TotalLines))
+	sb.WriteString("Notes:")
+	for _, note := range s.Notes {
+		sb.WriteString("\n")
+		if note.Bar {
+			sb.WriteString("\tBar\n")
+			continue
+		}
+
+		sb.WriteString(fmt.Sprintf("\tNote: %d\n", note.NoteNum))
+		sb.WriteString(fmt.Sprintf("\tStep Length: %d\n", note.StepLength))
+		sb.WriteString(fmt.Sprintf("\tGate Length: %d\n", note.GateLength))
+		sb.WriteString(fmt.Sprintf("\tPortamento: %t\n", note.Portamento))
+		sb.WriteString(fmt.Sprintf("\tAccent: %t\n", note.Accent))
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("Parity Byte 1: %02X\n", s.ParityByte1))
+	sb.WriteString(fmt.Sprintf("Total Lines 2: %d\n", s.TotalLines2))
+	sb.WriteString(fmt.Sprintf("Parity Byte 2: %02X\n", s.ParityByte2))
+
+	return sb.String()
 }
 
 func main() {
@@ -278,21 +414,16 @@ func main() {
 
 	fmt.Println("Success!")
 
-	_ = bytes
+	fmt.Println()
 
-	// changes := 0
+	for _, b := range bytes {
+		fmt.Printf("%02X ", b)
+	}
 
-	// for _, bit := range signBits {
-	// 	if bit == 1 {
-	// 		changes++
-	// 	}
+	fmt.Println()
+	fmt.Println()
 
-	// 	// if i < 2000 {
-	// 	fmt.Print(bit) // Process or display the bit
-	// 	// }
-	// }
+	sequnce := parseBytes(bytes)
 
-	// fmt.Println()
-	// fmt.Println(len(signBits))
-	// fmt.Println(changes)
+	fmt.Println(sequnce)
 }
