@@ -371,9 +371,9 @@ func validateBytes(data []byte) error {
 		return fmt.Errorf("validation failed - line count does not match: %d != %d", totalLines, endLineCount)
 	}
 
-	computedLineCount := int(int8(data[6+totalLines+1] + data[6+totalLines+2]))
+	computedLineCount := int8(data[6+totalLines+1]) + int8(data[6+totalLines+2])
 
-	lineCountParityByte := int(int8(data[6+totalLines+3]))
+	lineCountParityByte := int8(data[6+totalLines+3])
 
 	if computedLineCount+lineCountParityByte != 0 {
 		return fmt.Errorf("validation failed - invalid parity byte 2: computed: (%d, %02X) lineCountParityByte: (%d, %02X)", computedLineCount, byte(computedLineCount), lineCountParityByte, byte(lineCountParityByte))
