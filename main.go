@@ -20,6 +20,23 @@ const (
 	barByte          = 0xFF
 )
 
+var noteMap = buildNoteMap()
+
+func buildNoteMap() map[int]Note {
+	noteNames := []string{"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
+	noteMap := make(map[int]Note)
+
+	for i := 0; i < 64; i++ {
+		noteMap[i] = Note{
+			NoteNum:  i,
+			NoteName: noteNames[i%12],
+			Octave:   (i / 12) + 1,
+		}
+	}
+
+	return noteMap
+}
+
 // generateSignChangeBits reads a WAV file and emits a stream of sign-change bits.
 func generateSignChangeBits(decoder *wav.Decoder, offset bool) ([]int, error) {
 	var bits []int
@@ -292,20 +309,27 @@ type Sequence struct {
 	MagicByte     byte
 	ProgramNumber int
 	TotalLines    int
-	Notes         []Note
+	Notes         []NoteLine
 	ParityByte1   byte
 	TotalLines2   int
 	ParityByte2   byte
 }
 
-type Note struct {
-	NoteName   string
+type NoteLine struct {
 	NoteNum    int
+	NoteName   string
+	Octave     int
 	StepLength int
 	GateLength int
 	Portamento bool
 	Accent     bool
 	Bar        bool
+}
+
+type Note struct {
+	NoteNum  int
+	NoteName string
+	Octave   int
 }
 
 func validateBytes(data []byte) error {
@@ -387,7 +411,7 @@ func parseBytes(data []byte) (*Sequence, error) {
 		return nil, err
 	}
 
-	program := Sequence{
+	sequence := Sequence{
 		MagicByte:     data[0],
 		ProgramNumber: int(data[1])*100 + int(data[2])*10 + int(data[3]),
 		TotalLines:    int(binary.BigEndian.Uint16(data[4:6])),
@@ -396,12 +420,16 @@ func parseBytes(data []byte) (*Sequence, error) {
 	i := 6
 	for i < len(data)-4 { // Reserve the last 4 bytes for parity and line count
 		if data[i] == barByte {
-			program.Notes = append(program.Notes, Note{Bar: true})
+			sequence.Notes = append(sequence.Notes, NoteLine{Bar: true})
 			continue
 		}
 
-		program.Notes = append(program.Notes, Note{
-			NoteNum:    int(data[i+2] & 0b00111111),
+		noteNum := int(data[i+2] & 0b00111111)
+
+		sequence.Notes = append(sequence.Notes, NoteLine{
+			NoteNum:    noteNum,
+			NoteName:   noteMap[noteNum].NoteName,
+			Octave:     noteMap[noteNum].Octave,
 			StepLength: int(data[i]),
 			GateLength: int(data[i+1]),
 			Portamento: data[i+2]&0b10000000 != 0,
@@ -410,11 +438,11 @@ func parseBytes(data []byte) (*Sequence, error) {
 		i += 3
 	}
 
-	program.ParityByte1 = data[i]
-	program.TotalLines2 = int(binary.BigEndian.Uint16(data[i+1 : i+3]))
-	program.ParityByte2 = data[i+3]
+	sequence.ParityByte1 = data[i]
+	sequence.TotalLines2 = int(binary.BigEndian.Uint16(data[i+1 : i+3]))
+	sequence.ParityByte2 = data[i+3]
 
-	return &program, nil
+	return &sequence, nil
 }
 
 func (s *Sequence) String() string {
@@ -431,7 +459,9 @@ func (s *Sequence) String() string {
 			continue
 		}
 
-		sb.WriteString(fmt.Sprintf("\tNote: %d\n", note.NoteNum))
+		sb.WriteString(fmt.Sprintf("\tNote Number: %d\n", note.NoteNum))
+		sb.WriteString(fmt.Sprintf("\tNote Name: %s\n", note.NoteName))
+		sb.WriteString(fmt.Sprintf("\tOctave: %d\n", note.Octave))
 		sb.WriteString(fmt.Sprintf("\tStep Length: %d\n", note.StepLength))
 		sb.WriteString(fmt.Sprintf("\tGate Length: %d\n", note.GateLength))
 		sb.WriteString(fmt.Sprintf("\tPortamento: %t\n", note.Portamento))
@@ -510,5 +540,5 @@ func main() {
 
 	_ = sequence
 
-	// fmt.Println(sequence)
+	fmt.Println(sequence)
 }
