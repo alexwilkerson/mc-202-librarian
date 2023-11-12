@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/binary"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -477,68 +479,116 @@ func (s *Sequence) String() string {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run main.go <wav file>")
+	encodePtr := flag.Bool("encode", false, "encode a file")
+
+	decodePtr := flag.Bool("decode", false, "decode a file")
+
+	jsonPtr := flag.Bool("json", false, "output json")
+
+	fileNamePtr := flag.String("file", "", "file to encode/decode")
+
+	flag.Parse()
+
+	if *encodePtr && *decodePtr {
+		fmt.Println("cannot encode and decode at the same time")
 		os.Exit(1)
 	}
 
-	waveFile, err := os.Open(os.Args[1])
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-	defer waveFile.Close()
-
-	decoder := wav.NewDecoder(waveFile)
-	if !decoder.IsValidFile() {
-		fmt.Println("invalid wav file")
+	if !*encodePtr && !*decodePtr {
+		fmt.Println("must specify encode or decode")
 		os.Exit(1)
 	}
 
-	sampleRate := decoder.SampleRate
-
-	signBits, err := generateSignChangeBits(decoder, false)
-	if err != nil {
-		fmt.Println("problem generating sign change bits:", err)
-		os.Exit(1)
+	if *encodePtr {
+		// encode
+		fmt.Println("encode")
+		os.Exit(0)
 	}
 
-	bytes, err := generateBytes(signBits, int(sampleRate))
-	if err != nil {
-		fmt.Println(err)
-		fmt.Println("trying again with offset...")
+	if *decodePtr {
+		waveFile, err := os.Open(*fileNamePtr)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		defer waveFile.Close()
 
-		signBits, err = generateSignChangeBits(decoder, true)
+		decoder := wav.NewDecoder(waveFile)
+		if !decoder.IsValidFile() {
+			fmt.Println("invalid wav file")
+			os.Exit(1)
+		}
+
+		sampleRate := decoder.SampleRate
+
+		signBits, err := generateSignChangeBits(decoder, false)
 		if err != nil {
 			fmt.Println("problem generating sign change bits:", err)
 			os.Exit(1)
 		}
 
-		bytes, err = generateBytes(signBits, int(sampleRate))
+		bytes, err := generateBytes(signBits, int(sampleRate))
 		if err != nil {
-			fmt.Print("second attempt at generating bytes failed:", err)
+			fmt.Println(err)
+			fmt.Println("trying again with offset...")
+
+			signBits, err = generateSignChangeBits(decoder, true)
+			if err != nil {
+				fmt.Println("problem generating sign change bits:", err)
+				os.Exit(1)
+			}
+
+			bytes, err = generateBytes(signBits, int(sampleRate))
+			if err != nil {
+				fmt.Print("second attempt at generating bytes failed:", err)
+				os.Exit(1)
+			}
+		}
+
+		fmt.Println("Success!")
+
+		fmt.Println()
+
+		for _, b := range bytes {
+			fmt.Printf("%02X ", b)
+		}
+
+		fmt.Println()
+		fmt.Println()
+
+		sequence, err := parseBytes(bytes)
+		if err != nil {
+			fmt.Println("problem parsing bytes:", err)
 			os.Exit(1)
 		}
+
+		_ = sequence
+
+		fmt.Println(sequence)
+
+		if *jsonPtr {
+			name := strings.TrimSuffix(*fileNamePtr, ".wav")
+
+			f, err := os.Create(name + ".json")
+			if err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+			defer f.Close()
+
+			prettyJSON, err := json.MarshalIndent(sequence, "", "    ")
+			if err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+
+			_, err = f.Write(prettyJSON)
+			if err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+
+			fmt.Println("json file written to", name+".json")
+		}
 	}
-
-	fmt.Println("Success!")
-
-	fmt.Println()
-
-	for _, b := range bytes {
-		fmt.Printf("%02X ", b)
-	}
-
-	fmt.Println()
-	fmt.Println()
-
-	sequence, err := parseBytes(bytes)
-	if err != nil {
-		fmt.Println("problem parsing bytes:", err)
-		os.Exit(1)
-	}
-
-	_ = sequence
-
-	fmt.Println(sequence)
 }
