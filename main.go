@@ -123,12 +123,14 @@ func generateBytes(bitstream []int, framerate int) ([]byte, error) {
 	bitstreamIndex := framesPerBit - 1
 
 	var (
-		foundMagicByte bool
-		magicByteIndex int
-		previousByte   byte
-		validByteIndex int = -1
-		lastByteIndex  int
-		insideBuffer   bool
+		foundMagicByte         bool
+		magicByteIndex         int
+		previousByte           byte
+		validByteIndex         int = -1
+		lastByteIndex          int
+		channel1LineCount      int
+		channel2LineCountIndex int = -1
+		insideBuffer           bool
 	)
 
 L1:
@@ -178,8 +180,6 @@ L1:
 				}
 				bitstreamIndex += framesPerBit
 			}
-
-			// fmt.Printf("%02X\n", byteVal)
 
 			// short circuit if we have not found the magic byte yet
 			// therefore this must be invalid data
@@ -235,9 +235,6 @@ L1:
 						// the initial incorrect magic byte was found and continue iterating
 						// through the bitstream
 						if foundMagicByte {
-							fmt.Println("whoops")
-							fmt.Println("valid byte index:", validByteIndex)
-
 							foundMagicByte = false
 							bitstreamIndex = magicByteIndex + framesPerBit
 							validByteIndex = -1
@@ -270,7 +267,13 @@ L1:
 			}
 
 			if validByteIndex == 5 {
-				lastByteIndex = validByteIndex + int((uint16(previousByte)<<8)+uint16(byteVal)) + 4
+				channel1LineCount = int(binary.BigEndian.Uint16([]byte{previousByte, byte(byteVal)}))
+
+				channel2LineCountIndex = validByteIndex + channel1LineCount + 3 // checksum byte, line count byte 1, line count byte 2
+			}
+
+			if validByteIndex == channel2LineCountIndex {
+				lastByteIndex = validByteIndex + int(binary.BigEndian.Uint16([]byte{previousByte, byte(byteVal)})) - channel1LineCount + 1
 			}
 
 			result = append(result, byte(byteVal))
@@ -318,14 +321,18 @@ func sum(slice []int) int {
 }
 
 type Sequence struct {
-	MagicByte     byte
-	ProgramNumber int
-	TotalLines    int
-	Notes         []NoteLine
-	Checksum      byte
-	ChecksumByte  byte
-	TotalLines2   int
-	ParityByte    byte
+	MagicByte                 byte
+	ProgramNumber             int
+	NumChannels               int
+	Channel1LineCount         int
+	Channel1Notes             []NoteLine
+	Channel1Checksum          byte
+	Channel1ChecksumByte      byte
+	Channel2Notes             []NoteLine
+	Channel2LineCount         int
+	Channel2AdjustedLineCount int
+	Channel2Checksum          byte
+	Channel2ChecksumByte      byte
 }
 
 type NoteLine struct {
@@ -366,57 +373,78 @@ func validateBytes(data []byte) error {
 		return fmt.Errorf("validation failed - invalid program number byte 3: %d", int(data[3]))
 	}
 
-	totalLines := int(binary.BigEndian.Uint16(data[4:6]))
+	channel1LineCount := int(binary.BigEndian.Uint16(data[4:6]))
 
 	// Memory capacity: Approx. 2600 steps (pg. 61 of MC-202 manual)
 	// A step is 3 lines, therefore, the maximum number of lines is 2600*3
 	// Not sure what the absolute maximum is here, but in my testing, I
 	// was able to get up to 8200.
-	if totalLines < 0 || totalLines > 10000 {
-		return fmt.Errorf("validation failed - invalid total lines: %d", totalLines)
+	if channel1LineCount < 0 || channel1LineCount > 10000 {
+		return fmt.Errorf("validation failed - invalid channel 1 line count: %d", channel1LineCount)
 	}
 
-	if len(data) < totalLines+6 {
-		return fmt.Errorf("validation failed - invalid number of bytes (did not match total lines 1): %d", len(data))
+	if len(data) < 6+channel1LineCount+4 {
+		return fmt.Errorf("validation failed - invalid channel 1 line count, too few lines: %d", len(data))
 	}
 
-	bytesum := int8(data[4]) + int8(data[5])
-	var noteLines int
+	channel1Bytesum := int8(data[4]) + int8(data[5])
+	var channel1NoteLines int
 
-	for i := 0; i < totalLines; i++ {
-		bytesum += int8(data[6+i])
+	for i := 0; i < channel1LineCount; i++ {
+		channel1Bytesum += int8(data[6+i])
 
 		if data[6+i] != barByte {
-			noteLines++
+			channel1NoteLines++
 		}
 	}
 
-	checksum := int8(bytesum)
+	channel1Checksum := int8(channel1Bytesum)
 
-	fmt.Println("checksum:", checksum)
-
-	if noteLines%3 != 0 {
-		return fmt.Errorf("validation failed - invalid number of note lines: %d", noteLines)
+	if channel1NoteLines%3 != 0 {
+		return fmt.Errorf("validation failed - invalid number of note lines in channel 1: %d", channel1NoteLines)
 	}
 
-	checksumByte := int8(data[6+totalLines])
+	channel1ChecksumByte := int8(data[6+channel1LineCount])
 
-	if checksumByte+checksum != 0 {
-		return fmt.Errorf("validation failed - invalid checksum byte: checksum byte: (%d, %02X) checksum: (%d, %02X)", checksumByte, byte(checksumByte), checksum, byte(checksum))
+	if channel1ChecksumByte+channel1Checksum != 0 {
+		return fmt.Errorf("validation failed - invalid channel 1 checksum: byte: (%d, %02X) checksum: (%d, %02X)", channel1ChecksumByte, byte(channel1ChecksumByte), channel1Checksum, byte(channel1Checksum))
 	}
 
-	endLineCount := int(binary.BigEndian.Uint16(data[6+totalLines+1 : 6+totalLines+3]))
+	channel2LineCount := int(binary.BigEndian.Uint16(data[6+channel1LineCount+1 : 6+channel1LineCount+3]))
 
-	if totalLines != endLineCount {
-		return fmt.Errorf("validation failed - line count does not match: %d != %d", totalLines, endLineCount)
+	if channel2LineCount < 0 || channel2LineCount > 10000 {
+		return fmt.Errorf("validation failed - invalid channel 2 line count: %d", channel2LineCount)
 	}
 
-	computedLineCount := int8(data[6+totalLines+1]) + int8(data[6+totalLines+2])
+	if len(data) < 6+channel2LineCount+4 {
+		return fmt.Errorf("validation failed - invalid channel 2 line count, too few lines: %d", len(data))
+	}
 
-	lineCountParityByte := int8(data[6+totalLines+3])
+	channel2Checksum := int8(data[6+channel1LineCount+1]) + int8(data[6+channel1LineCount+2])
 
-	if computedLineCount+lineCountParityByte != 0 {
-		return fmt.Errorf("validation failed - invalid parity byte: computed: (%d, %02X) line count parity byte: (%d, %02X)", computedLineCount, byte(computedLineCount), lineCountParityByte, byte(lineCountParityByte))
+	var channel2NoteLines int
+
+	fmt.Println(channel1LineCount)
+	fmt.Println(channel2LineCount)
+
+	for i := 0; i < channel2LineCount-channel1LineCount; i++ {
+		fmt.Println(6 + channel1LineCount + 3 + i)
+
+		channel2Checksum += int8(data[6+channel1LineCount+3+i])
+
+		if data[6+channel1LineCount+3+i] != barByte {
+			channel2NoteLines++
+		}
+	}
+
+	channel2ChecksumByte := int8(data[6+channel2LineCount+3])
+
+	if channel2NoteLines%3 != 0 {
+		return fmt.Errorf("validation failed - invalid number of note lines in channel 2: %d", channel1NoteLines)
+	}
+
+	if channel2ChecksumByte+channel2Checksum != 0 {
+		return fmt.Errorf("validation failed - invalid channel 2 checksum: byte: (%d, %02X), checksum: (%d, %02X)", channel2ChecksumByte, byte(channel2ChecksumByte), channel2Checksum, byte(channel2Checksum))
 	}
 
 	return nil
@@ -428,29 +456,29 @@ func parseBytes(data []byte) (*Sequence, error) {
 	}
 
 	sequence := Sequence{
-		MagicByte:     data[0],
-		ProgramNumber: int(data[1])*100 + int(data[2])*10 + int(data[3]),
-		TotalLines:    int(binary.BigEndian.Uint16(data[4:6])),
+		MagicByte:         data[0],
+		ProgramNumber:     int(data[1])*100 + int(data[2])*10 + int(data[3]),
+		NumChannels:       1,
+		Channel1LineCount: int(binary.BigEndian.Uint16(data[4:6])),
 	}
 
-	checksum := int8(data[4]) + int8(data[5])
+	channel1Checksum := int8(data[4]) + int8(data[5])
 
-	i := 6
-	for i < len(data)-4 { // Reserve the last 4 bytes for checksum byte, line count, and parity byte
+	for i := 0; i < sequence.Channel1LineCount; i++ { // Reserve the last 4 bytes for checksum byte, line count, and parity byte
 		if data[i] == barByte {
-			checksum += int8(data[i])
+			channel1Checksum += int8(data[6+i])
 
-			sequence.Notes = append(sequence.Notes, NoteLine{Bar: true})
+			sequence.Channel1Notes = append(sequence.Channel1Notes, NoteLine{Bar: true})
 			continue
 		}
 
-		checksum += int8(data[i])
-		checksum += int8(data[i+1])
-		checksum += int8(data[i+2])
+		channel1Checksum += int8(data[6+i])
+		channel1Checksum += int8(data[6+i+1])
+		channel1Checksum += int8(data[6+i+2])
 
-		noteNum := int(data[i+2] & 0b00111111)
+		noteNum := int(data[6+i+2] & 0b00111111)
 
-		sequence.Notes = append(sequence.Notes, NoteLine{
+		sequence.Channel1Notes = append(sequence.Channel1Notes, NoteLine{
 			NoteNum:    noteNum,
 			NoteName:   noteMap[noteNum].NoteName,
 			Octave:     noteMap[noteNum].Octave,
@@ -459,13 +487,55 @@ func parseBytes(data []byte) (*Sequence, error) {
 			Portamento: data[i+2]&0b10000000 != 0,
 			Accent:     data[i+2]&0b01000000 != 0,
 		})
-		i += 3
+		i += 2 // Skip the next three bytes since they are part of the same note
+		// The for loop takes care of incrementing i by 1
 	}
 
-	sequence.Checksum = byte(checksum)
-	sequence.ChecksumByte = data[i]
-	sequence.TotalLines2 = int(binary.BigEndian.Uint16(data[i+1 : i+3]))
-	sequence.ParityByte = data[i+3]
+	sequence.Channel1Checksum = byte(channel1Checksum)
+	sequence.Channel1ChecksumByte = data[6+sequence.Channel1LineCount]
+
+	// Channel 2
+	sequence.Channel2LineCount = int(binary.BigEndian.Uint16(data[6+sequence.Channel1LineCount+1 : 6+sequence.Channel1LineCount+3]))
+	sequence.Channel2AdjustedLineCount = sequence.Channel2LineCount - sequence.Channel1LineCount
+
+	if sequence.Channel1LineCount != sequence.Channel2LineCount && sequence.Channel1LineCount != 0 {
+		sequence.NumChannels = 2
+	}
+
+	sequence.Channel2ChecksumByte = data[6+sequence.Channel1LineCount+3]
+
+	channel2Checksum := int8(data[6+sequence.Channel1LineCount+1]) + int8(data[6+sequence.Channel1LineCount+2])
+
+	for i := 0; i < sequence.Channel2AdjustedLineCount; i++ {
+		if data[6+sequence.Channel1LineCount+3+i] == barByte {
+			channel2Checksum += int8(data[6+sequence.Channel1LineCount+3+i])
+
+			sequence.Channel2Notes = append(sequence.Channel2Notes, NoteLine{Bar: true})
+			continue
+		}
+
+		channel2Checksum += int8(data[6+sequence.Channel1LineCount+3+i])
+		channel2Checksum += int8(data[6+sequence.Channel1LineCount+3+i+1])
+		channel2Checksum += int8(data[6+sequence.Channel1LineCount+3+i+2])
+
+		noteNum := int(data[6+sequence.Channel1LineCount+3+i+2] & 0b00111111)
+
+		sequence.Channel2Notes = append(sequence.Channel2Notes, NoteLine{
+			NoteNum:    noteNum,
+			NoteName:   noteMap[noteNum].NoteName,
+			Octave:     noteMap[noteNum].Octave,
+			StepLength: int(data[6+sequence.Channel1LineCount+3+i]),
+			GateLength: int(data[6+sequence.Channel1LineCount+3+i+1]),
+			Portamento: data[6+sequence.Channel1LineCount+3+i+2]&0b10000000 != 0,
+			Accent:     data[6+sequence.Channel1LineCount+3+i+2]&0b01000000 != 0,
+		})
+
+		i += 2 // Skip the next three bytes since they are part of the same note
+		// The for loop takes care of incrementing i by 1
+	}
+
+	sequence.Channel2Checksum = byte(channel2Checksum)
+	sequence.Channel2ChecksumByte = data[6+sequence.Channel1LineCount+3+sequence.Channel2AdjustedLineCount]
 
 	return &sequence, nil
 }
@@ -475,9 +545,11 @@ func (s *Sequence) String() string {
 
 	// pretty print the program
 	sb.WriteString(fmt.Sprintf("Program Number: %d\n", s.ProgramNumber))
-	sb.WriteString(fmt.Sprintf("Total Lines: %d\n", s.TotalLines))
-	sb.WriteString("Notes:")
-	for _, note := range s.Notes {
+	sb.WriteString(fmt.Sprintf("Number of Channels: %d\n", s.NumChannels))
+
+	sb.WriteString(fmt.Sprintf("Channel 1 Line Count: %d\n", s.Channel1LineCount))
+	sb.WriteString("Channel 1 Notes:")
+	for _, note := range s.Channel1Notes {
 		sb.WriteString("\n")
 		if note.Bar {
 			sb.WriteString("\tBar\n")
@@ -491,15 +563,46 @@ func (s *Sequence) String() string {
 		sb.WriteString(fmt.Sprintf("\tGate Length: %d\n", note.GateLength))
 		sb.WriteString(fmt.Sprintf("\tPortamento: %t\n", note.Portamento))
 		sb.WriteString(fmt.Sprintf("\tAccent: %t\n", note.Accent))
+	}
+	if len(s.Channel1Notes) == 0 {
+		sb.WriteString(" None\n")
+	} else {
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString(fmt.Sprintf("Checksum Int: %d\n", int8(s.Checksum)))
-	sb.WriteString(fmt.Sprintf("Checksum Hex: %02X\n", s.Checksum))
-	sb.WriteString(fmt.Sprintf("Checksum Byte Int: %d\n", int8(s.ChecksumByte)))
-	sb.WriteString(fmt.Sprintf("Checksum Byte Hex: %02X\n", s.ChecksumByte))
-	sb.WriteString(fmt.Sprintf("Total Lines 2: %d\n", s.TotalLines2))
-	sb.WriteString(fmt.Sprintf("Parity Byte: %02X\n", s.ParityByte))
+	sb.WriteString(fmt.Sprintf("Channel 1 Checksum Int: %d\n", int8(s.Channel1Checksum)))
+	sb.WriteString(fmt.Sprintf("Channel 1 Checksum Hex: %02X\n", s.Channel1Checksum))
+	sb.WriteString(fmt.Sprintf("Channel 1 Checksum Byte Int: %d\n", int8(s.Channel1ChecksumByte)))
+	sb.WriteString(fmt.Sprintf("Channel 1 Checksum Byte Hex: %02X\n", s.Channel1ChecksumByte))
+
+	sb.WriteString(fmt.Sprintf("Channel 2 Line Count: %d\n", s.Channel2LineCount))
+	sb.WriteString(fmt.Sprintf("Channel 2 Adjusted Line Count: %d\n", s.Channel2AdjustedLineCount))
+	sb.WriteString("Channel 2 Notes:")
+	for _, note := range s.Channel2Notes {
+		sb.WriteString("\n")
+		if note.Bar {
+			sb.WriteString("\tBar\n")
+			continue
+		}
+
+		sb.WriteString(fmt.Sprintf("\tNote Number: %d\n", note.NoteNum))
+		sb.WriteString(fmt.Sprintf("\tNote Name: %s\n", note.NoteName))
+		sb.WriteString(fmt.Sprintf("\tOctave: %d\n", note.Octave))
+		sb.WriteString(fmt.Sprintf("\tStep Length: %d\n", note.StepLength))
+		sb.WriteString(fmt.Sprintf("\tGate Length: %d\n", note.GateLength))
+		sb.WriteString(fmt.Sprintf("\tPortamento: %t\n", note.Portamento))
+		sb.WriteString(fmt.Sprintf("\tAccent: %t\n", note.Accent))
+	}
+	if len(s.Channel2Notes) == 0 {
+		sb.WriteString(" None\n")
+	} else {
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("Channel 2 Checksum Int: %d\n", int8(s.Channel2Checksum)))
+	sb.WriteString(fmt.Sprintf("Channel 2 Checksum Hex: %02X\n", s.Channel2Checksum))
+	sb.WriteString(fmt.Sprintf("Channel 2 Checksum Byte Int: %d\n", int8(s.Channel2ChecksumByte)))
+	sb.WriteString(fmt.Sprintf("Channel 2 Checksum Byte Hex: %02X\n", s.Channel2ChecksumByte))
 
 	return sb.String()
 }
