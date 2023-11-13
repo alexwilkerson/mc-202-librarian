@@ -424,12 +424,7 @@ func validateBytes(data []byte) error {
 
 	var channel2NoteLines int
 
-	fmt.Println(channel1LineCount)
-	fmt.Println(channel2LineCount)
-
 	for i := 0; i < channel2LineCount-channel1LineCount; i++ {
-		fmt.Println(6 + channel1LineCount + 3 + i)
-
 		channel2Checksum += int8(data[6+channel1LineCount+3+i])
 
 		if data[6+channel1LineCount+3+i] != barByte {
