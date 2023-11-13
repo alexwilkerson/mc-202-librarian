@@ -321,9 +321,9 @@ type Sequence struct {
 	ProgramNumber int
 	TotalLines    int
 	Notes         []NoteLine
-	ParityByte1   byte
+	ChecksumByte  byte
 	TotalLines2   int
-	ParityByte2   byte
+	ParityByte    byte
 }
 
 type NoteLine struct {
@@ -366,8 +366,9 @@ func validateBytes(data []byte) error {
 
 	totalLines := int(binary.BigEndian.Uint16(data[4:6]))
 
-	// TODO: verify maximum line count
-	if totalLines < 0 || totalLines > 999 {
+	// Memory capacity: Approx. 2600 steps (pg. 61 of MC-202 manual)
+	// A step is 3 lines, therefore, the maximum number of lines is 2600*3
+	if totalLines < 0 || totalLines > 2600*3 {
 		return fmt.Errorf("validation failed - invalid total lines: %d", totalLines)
 	}
 
@@ -375,11 +376,11 @@ func validateBytes(data []byte) error {
 		return fmt.Errorf("validation failed - invalid number of bytes (did not match total lines 1): %d", len(data))
 	}
 
-	bytesum := totalLines
+	bytesum := int8(data[4]) + int8(data[5])
 	var noteLines int
 
 	for i := 0; i < totalLines; i++ {
-		bytesum += int(data[6+i])
+		bytesum += int8(data[6+i])
 
 		if data[6+i] != barByte {
 			noteLines++
@@ -392,12 +393,10 @@ func validateBytes(data []byte) error {
 		return fmt.Errorf("validation failed - invalid number of note lines: %d", noteLines)
 	}
 
-	parityByte := data[6+totalLines]
+	checksumByte := int8(data[6+totalLines])
 
-	computedParityByte := int8(parityByte) + int8(data[6+totalLines+1])
-
-	if computedParityByte+checksum != 0 {
-		return fmt.Errorf("validation failed - invalid parity byte 1: computed: (%d, %02X) checksum: (%d, %02X)", computedParityByte, byte(computedParityByte), checksum, byte(checksum))
+	if checksumByte+checksum != 0 {
+		return fmt.Errorf("validation failed - invalid checksum byte: checksum byte: (%d, %02X) checksum: (%d, %02X)", checksumByte, byte(checksumByte), checksum, byte(checksum))
 	}
 
 	endLineCount := int(binary.BigEndian.Uint16(data[6+totalLines+1 : 6+totalLines+3]))
@@ -411,7 +410,7 @@ func validateBytes(data []byte) error {
 	lineCountParityByte := int8(data[6+totalLines+3])
 
 	if computedLineCount+lineCountParityByte != 0 {
-		return fmt.Errorf("validation failed - invalid parity byte 2: computed: (%d, %02X) lineCountParityByte: (%d, %02X)", computedLineCount, byte(computedLineCount), lineCountParityByte, byte(lineCountParityByte))
+		return fmt.Errorf("validation failed - invalid parity byte: computed: (%d, %02X) line count parity byte: (%d, %02X)", computedLineCount, byte(computedLineCount), lineCountParityByte, byte(lineCountParityByte))
 	}
 
 	return nil
@@ -429,7 +428,7 @@ func parseBytes(data []byte) (*Sequence, error) {
 	}
 
 	i := 6
-	for i < len(data)-4 { // Reserve the last 4 bytes for parity and line count
+	for i < len(data)-4 { // Reserve the last 4 bytes for checksum byte, line count, and parity byte
 		if data[i] == barByte {
 			sequence.Notes = append(sequence.Notes, NoteLine{Bar: true})
 			continue
@@ -449,9 +448,9 @@ func parseBytes(data []byte) (*Sequence, error) {
 		i += 3
 	}
 
-	sequence.ParityByte1 = data[i]
+	sequence.ChecksumByte = data[i]
 	sequence.TotalLines2 = int(binary.BigEndian.Uint16(data[i+1 : i+3]))
-	sequence.ParityByte2 = data[i+3]
+	sequence.ParityByte = data[i+3]
 
 	return &sequence, nil
 }
@@ -480,24 +479,12 @@ func (s *Sequence) String() string {
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString(fmt.Sprintf("Parity Byte 1: %02X\n", s.ParityByte1))
+	sb.WriteString(fmt.Sprintf("Checksum Byte: %02X\n", s.ChecksumByte))
 	sb.WriteString(fmt.Sprintf("Total Lines 2: %d\n", s.TotalLines2))
-	sb.WriteString(fmt.Sprintf("Parity Byte 2: %02X\n", s.ParityByte2))
+	sb.WriteString(fmt.Sprintf("Parity Byte: %02X\n", s.ParityByte))
 
 	return sb.String()
 }
-
-// func generateSamples(freq int, cycles int, amplitude float64) []int {
-// 	numSamples := int(math.Round(float64(cycles*sampleRate) / float64(freq)))
-// 	samples := make([]int, numSamples)
-
-// 	for i := 0; i < numSamples; i++ {
-// 		samples[i] = int(amplitude * float64(0x7FFF) * math.Sin(2*math.Pi*float64(i)*float64(freq)/float64(sampleRate)))
-// 		fmt.Println(samples[i])
-// 	}
-
-// 	return samples
-// }
 
 func generateSamples(freq int, cycles int, amplitude float64) []int {
 	numSamples := int(math.Round(float64(cycles*sampleRate) / float64(freq)))
@@ -579,12 +566,6 @@ func main() {
 			fmt.Println("problem generating sign change bits:", err)
 			os.Exit(1)
 		}
-
-		// for i := 0; i < len(signBits); i++ {
-		// 	fmt.Printf("%d", signBits[i])
-		// }
-
-		// fmt.Println()
 
 		bytes, err := generateBytes(signBits, int(sampleRate))
 		if err != nil {
