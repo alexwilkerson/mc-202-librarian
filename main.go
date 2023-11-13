@@ -235,6 +235,9 @@ L1:
 						// the initial incorrect magic byte was found and continue iterating
 						// through the bitstream
 						if foundMagicByte {
+							fmt.Println("whoops")
+							fmt.Println("valid byte index:", validByteIndex)
+
 							foundMagicByte = false
 							bitstreamIndex = magicByteIndex + framesPerBit
 							validByteIndex = -1
@@ -260,8 +263,6 @@ L1:
 
 			// VALID BYTE
 			validByteIndex++
-
-			fmt.Println("magic")
 
 			if byteVal == magicByte {
 				foundMagicByte = true
@@ -321,6 +322,7 @@ type Sequence struct {
 	ProgramNumber int
 	TotalLines    int
 	Notes         []NoteLine
+	Checksum      byte
 	ChecksumByte  byte
 	TotalLines2   int
 	ParityByte    byte
@@ -368,7 +370,9 @@ func validateBytes(data []byte) error {
 
 	// Memory capacity: Approx. 2600 steps (pg. 61 of MC-202 manual)
 	// A step is 3 lines, therefore, the maximum number of lines is 2600*3
-	if totalLines < 0 || totalLines > 2600*3 {
+	// Not sure what the absolute maximum is here, but in my testing, I
+	// was able to get up to 8200.
+	if totalLines < 0 || totalLines > 10000 {
 		return fmt.Errorf("validation failed - invalid total lines: %d", totalLines)
 	}
 
@@ -388,6 +392,8 @@ func validateBytes(data []byte) error {
 	}
 
 	checksum := int8(bytesum)
+
+	fmt.Println("checksum:", checksum)
 
 	if noteLines%3 != 0 {
 		return fmt.Errorf("validation failed - invalid number of note lines: %d", noteLines)
@@ -427,12 +433,20 @@ func parseBytes(data []byte) (*Sequence, error) {
 		TotalLines:    int(binary.BigEndian.Uint16(data[4:6])),
 	}
 
+	checksum := int8(data[4]) + int8(data[5])
+
 	i := 6
 	for i < len(data)-4 { // Reserve the last 4 bytes for checksum byte, line count, and parity byte
 		if data[i] == barByte {
+			checksum += int8(data[i])
+
 			sequence.Notes = append(sequence.Notes, NoteLine{Bar: true})
 			continue
 		}
+
+		checksum += int8(data[i])
+		checksum += int8(data[i+1])
+		checksum += int8(data[i+2])
 
 		noteNum := int(data[i+2] & 0b00111111)
 
@@ -448,6 +462,7 @@ func parseBytes(data []byte) (*Sequence, error) {
 		i += 3
 	}
 
+	sequence.Checksum = byte(checksum)
 	sequence.ChecksumByte = data[i]
 	sequence.TotalLines2 = int(binary.BigEndian.Uint16(data[i+1 : i+3]))
 	sequence.ParityByte = data[i+3]
@@ -479,7 +494,10 @@ func (s *Sequence) String() string {
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString(fmt.Sprintf("Checksum Byte: %02X\n", s.ChecksumByte))
+	sb.WriteString(fmt.Sprintf("Checksum Int: %d\n", int8(s.Checksum)))
+	sb.WriteString(fmt.Sprintf("Checksum Hex: %02X\n", s.Checksum))
+	sb.WriteString(fmt.Sprintf("Checksum Byte Int: %d\n", int8(s.ChecksumByte)))
+	sb.WriteString(fmt.Sprintf("Checksum Byte Hex: %02X\n", s.ChecksumByte))
 	sb.WriteString(fmt.Sprintf("Total Lines 2: %d\n", s.TotalLines2))
 	sb.WriteString(fmt.Sprintf("Parity Byte: %02X\n", s.ParityByte))
 
