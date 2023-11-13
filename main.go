@@ -33,7 +33,7 @@ func buildNoteMap() map[int]Note {
 	noteNames := []string{"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
 	noteMap := make(map[int]Note)
 
-	for i := 0; i < 64; i++ {
+	for i := 0; i < 61; i++ {
 		noteMap[i] = Note{
 			NoteNum:  i,
 			NoteName: noteNames[i%12],
@@ -395,6 +395,13 @@ func validateBytes(data []byte) error {
 
 		if data[6+i] != barByte {
 			channel1NoteLines++
+
+			if (channel1NoteLines+1)%3 == 0 {
+				noteNum := int(data[6+i] & 0b00111111)
+				if noteNum < 0 || noteNum > 60 {
+					return fmt.Errorf("validation failed - invalid note number, channel 1, line %d: %d", noteNum, i)
+				}
+			}
 		}
 	}
 
@@ -429,6 +436,13 @@ func validateBytes(data []byte) error {
 
 		if data[6+channel1LineCount+3+i] != barByte {
 			channel2NoteLines++
+
+			if (channel2NoteLines+1)%3 == 0 {
+				noteNum := int(data[6+channel1LineCount+3+i] & 0b00111111)
+				if noteNum < 0 || noteNum > 60 {
+					return fmt.Errorf("validation failed - invalid note number, channel 2, line %d: %d", noteNum, i)
+				}
+			}
 		}
 	}
 
