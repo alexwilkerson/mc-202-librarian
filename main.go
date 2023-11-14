@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path"
 	"strings"
 
 	"github.com/go-audio/audio"
@@ -491,10 +492,10 @@ func parseBytes(data []byte) (*Sequence, error) {
 			NoteNum:    noteNum,
 			NoteName:   noteMap[noteNum].NoteName,
 			Octave:     noteMap[noteNum].Octave,
-			StepLength: int(data[i]),
-			GateLength: int(data[i+1]),
-			Portamento: data[i+2]&0b10000000 != 0,
-			Accent:     data[i+2]&0b01000000 != 0,
+			StepLength: int(data[6+i]),
+			GateLength: int(data[6+i+1]),
+			Portamento: data[6+i+2]&0b10000000 != 0,
+			Accent:     data[6+i+2]&0b01000000 != 0,
 		})
 		i += 2 // Skip the next three bytes since they are part of the same note
 		// The for loop takes care of incrementing i by 1
@@ -649,10 +650,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	if fileNamePtr == nil || *fileNamePtr == "" {
+		fmt.Println("must specify a file")
+		os.Exit(1)
+	}
+
 	if *encodePtr {
 		// encode
+		samples := generateSequenceFile(*fileNamePtr)
 
-		f, err := os.Create("test.wav")
+		name := path.Join("./encoded", strings.TrimSuffix(*fileNamePtr, ".json")) + ".wav"
+
+		f, err := os.Create(name)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
@@ -661,9 +670,6 @@ func main() {
 
 		enc := wav.NewEncoder(f, sampleRate, 16, 1, 1)
 		defer enc.Close()
-
-		// samples := generateSamples(baseFreq, 7*baseFreq, 0.5)
-		samples := generateEmptySequence(0.25)
 
 		buf := &audio.IntBuffer{Data: samples, Format: &audio.Format{SampleRate: sampleRate, NumChannels: 1}}
 
@@ -736,7 +742,7 @@ func main() {
 
 		fmt.Println(sequence)
 
-		if *jsonPtr {
+		if *decodePtr && *jsonPtr {
 			name := strings.TrimSuffix(*fileNamePtr, ".wav")
 
 			f, err := os.Create(name + ".json")
@@ -761,6 +767,161 @@ func main() {
 			fmt.Println("json file written to", name+".json")
 		}
 	}
+}
+
+// generateSequenceFile takes a JSON file of the Sequence struct and generates the data
+// for a wav file based on the data in the struct.
+func generateSequenceFile(fileName string) []int {
+	f, err := os.Open(fileName)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	fmt.Println(fileName)
+
+	decoder := json.NewDecoder(f)
+
+	var sequence Sequence
+
+	err = decoder.Decode(&sequence)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	var result []int
+
+	// generate 7 seconds of leader tone
+	result = append(result, generateSamples(oneFreq, 7*oneFreq, 0.25)...)
+
+	result = append(result, generateByteSequence(magicByte, 0.25)...)
+
+	// program number
+	result = append(result, generateByteSequence(byte(sequence.ProgramNumber/100), 0.25)...)
+	result = append(result, generateByteSequence(byte(sequence.ProgramNumber%100/10), 0.25)...)
+	result = append(result, generateByteSequence(byte(sequence.ProgramNumber%10), 0.25)...)
+
+	// data buffer
+	result = append(result, generateSamples(oneFreq, dataBufferLength*oneCycles, 0.25)...)
+
+	var channel1LineCount int
+
+	for _, note := range sequence.Channel1Notes {
+		if note.Bar {
+			channel1LineCount++
+		} else {
+			channel1LineCount += 3
+		}
+	}
+
+	var channel1Checksum int16
+
+	// insert channel 1 line count
+	result = append(result, generateByteSequence(byte(channel1LineCount/256), 0.25)...)
+	result = append(result, generateByteSequence(byte(channel1LineCount%256), 0.25)...)
+
+	channel1Checksum += int16(channel1LineCount / 256)
+	channel1Checksum += int16(channel1LineCount % 256)
+
+	for _, note := range sequence.Channel1Notes {
+		if note.Bar {
+			result = append(result, generateByteSequence(barByte, 0.25)...)
+			channel1Checksum += int16(barByte)
+		} else {
+			result = append(result, generateByteSequence(byte(note.StepLength), 0.25)...)
+			result = append(result, generateByteSequence(byte(note.GateLength), 0.25)...)
+
+			var noteByte byte
+
+			if note.Portamento {
+				noteByte |= 0b10000000
+			}
+
+			if note.Accent {
+				noteByte |= 0b01000000
+			}
+
+			noteByte |= byte(note.NoteNum)
+
+			result = append(result, generateByteSequence(noteByte, 0.25)...)
+
+			channel1Checksum += int16(note.StepLength)
+			channel1Checksum += int16(note.GateLength)
+			channel1Checksum += int16(noteByte)
+		}
+	}
+
+	channel1ChecksumByte := byte(channel1Checksum)
+
+	// convert to two's complement
+	channel1ChecksumByte = ^channel1ChecksumByte
+	channel1ChecksumByte++
+
+	// insert channel 1 checksum
+	result = append(result, generateByteSequence(channel1ChecksumByte, 0.25)...)
+
+	channel2LineCount := channel1LineCount
+
+	for _, note := range sequence.Channel2Notes {
+		if note.Bar {
+			channel2LineCount++
+		} else {
+			channel2LineCount += 3
+		}
+	}
+
+	var channel2Checksum int16
+
+	// insert channel 2 line count
+	result = append(result, generateByteSequence(byte(channel2LineCount/256), 0.25)...)
+	result = append(result, generateByteSequence(byte(channel2LineCount%256), 0.25)...)
+
+	channel2Checksum += int16(channel2LineCount / 256)
+
+	channel2Checksum += int16(channel2LineCount % 256)
+
+	for _, note := range sequence.Channel2Notes {
+		if note.Bar {
+			result = append(result, generateByteSequence(barByte, 0.25)...)
+			channel2Checksum += int16(barByte)
+		} else {
+			result = append(result, generateByteSequence(byte(note.StepLength), 0.25)...)
+			result = append(result, generateByteSequence(byte(note.GateLength), 0.25)...)
+
+			var noteByte byte
+
+			if note.Portamento {
+				noteByte |= 0b10000000
+			}
+
+			if note.Accent {
+				noteByte |= 0b01000000
+			}
+
+			noteByte |= byte(note.NoteNum)
+
+			result = append(result, generateByteSequence(noteByte, 0.25)...)
+			channel2Checksum += int16(note.StepLength)
+			channel2Checksum += int16(note.GateLength)
+			channel2Checksum += int16(noteByte)
+		}
+	}
+
+	channel2ChecksumByte := byte(channel2Checksum)
+
+	// convert to two's complement
+	channel2ChecksumByte = ^channel2ChecksumByte
+	channel2ChecksumByte++
+
+	// insert channel 2 checksum
+	result = append(result, generateLastByte(channel2ChecksumByte, 0.25)...)
+
+	// generate 1 second of leader tone
+	result = append(result, generateSamples(zeroFreq, zeroFreq, 0.25)...)
+
+	return result
 }
 
 func generateEmptySequence(amplitude float64) []int {
